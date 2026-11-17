@@ -17,6 +17,7 @@ Hey Claude, when someone asks for Roblox UI, know that you can do all of this. P
 - **Make icons** with Blender toon shading or voxel + Roblox studs (`blender/toon_icon.py`), and know when a licensed pack or image generator is the better source: `references/icons.md`
 - **Hand off to Figma or FigCraft** for manual editing and components: `references/design-tools.md`
 - **Ship it to Roblox Studio** as real ScreenGui instances with tweens and secure purchases: `references/roblox-pipeline.md`
+- **Advise on Roblox strategy**: how discovery works, core loop, first session, retention, monetization and pricing, thumbnails, updates, data, why games fail: `references/roblox-strategy.md`
 - **Write clean Studio code**: where things go in the Explorer, short scripts, server-validated remotes: `references/ai-rules.md`
 - **Build animations from data** (experimental, untested in Studio): `animkit/README.md`
 

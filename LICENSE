@@ -1,21 +1,17 @@
-AI Roblox Tools - License
-Copyright (c) 2026 Nomako20. All rights reserved.
+AI Roblox Tools
+Copyright (c) 2026 Nomako20
 
-You MAY:
-- use this skill and its files to make UI, icons and other content for your own Roblox games
-  (free or paid games), and ship what you make with it inside those games;
-- modify it for your own private use.
+This work is licensed under the Creative Commons Attribution-NonCommercial 4.0 International License (CC BY-NC 4.0).
+Full text: https://creativecommons.org/licenses/by-nc/4.0/legalcode
 
-You may NOT:
-- copy, re-upload, mirror or redistribute this repository or substantial parts of it
-  (text, code, examples, images, renders, Blender files), in original or modified form;
-- sell it or include it in another pack, template, course, skill or product;
-- remove this notice or present this work, or a modified version of it, as your own.
+In short:
+- You CAN use it, change it and share it (also changed versions).
+- You MUST give credit: name "Nomako20" and link to the original repository, and say if you changed it.
+- You may NOT sell it or use it commercially (for example selling it, or putting it in a paid pack, course or product).
 
-For any other use, ask the author first via GitHub (Nomako20).
+Your own creations: UI, icons, screens and games you make WITH this skill belong to you, and you may use them in
+free or paid Roblox games. The non-commercial rule applies to this repository's own material, not to what you build with it.
 
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED. IN NO EVENT SHALL
-THE AUTHOR BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY ARISING FROM ITS USE.
+Third-party parts keep their own licenses: the fonts in kit/fonts are under the SIL Open Font License 1.1 (see CREDITS.md).
 
-Third-party parts keep their own licenses: the fonts in kit/fonts are licensed under the
-SIL Open Font License 1.1 (see CREDITS.md) and are not covered by the restrictions above.
+Provided "as is", without warranty of any kind.

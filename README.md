@@ -41,4 +41,4 @@ Send it 2-4 screenshots of big games you like for best results. Full walkthrough
 The skill encodes the rules and the recipes. Getting from "good" to "top game" still takes a person looking at the result and pointing at what's off. Mockups are PNGs: shipping to Studio follows `references/roblox-pipeline.md`.
 
 ## Credits
-Made by **Nomako20** with Claude. See [CREDITS.md](CREDITS.md). All rights reserved: see [LICENSE](LICENSE) (free to use in your own games, not to redistribute or resell).
+Made by **Nomako20** with Claude. See [CREDITS.md](CREDITS.md). License: [CC BY-NC 4.0](LICENSE). Change and share it with credit; don't sell it. What you build with it is yours.

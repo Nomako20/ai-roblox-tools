@@ -1,0 +1,29 @@
+{
+  "name": "ai-roblox-tools",
+  "owner": {
+    "name": "Nomako20"
+  },
+  "metadata": {
+    "description": "Skills that teach AI agents to build Roblox games properly."
+  },
+  "plugins": [
+    {
+      "name": "ai-roblox-tools",
+      "source": "./",
+      "description": "Roblox UI that looks like the big games: shops, egg screens, season pass, placement, icons, Roblox strategy.",
+      "version": "1.0.0",
+      "author": {
+        "name": "Nomako20"
+      },
+      "license": "CC-BY-NC-4.0",
+      "keywords": [
+        "roblox",
+        "roblox-ui",
+        "game-ui",
+        "claude-skills",
+        "luau",
+        "roblox-studio"
+      ]
+    }
+  ]
+}

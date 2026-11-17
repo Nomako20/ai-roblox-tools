@@ -25,10 +25,16 @@
 </p>
 
 ## Install
+**Claude Code plugin (one command):**
+```
+/plugin marketplace add Nomako20/ai-roblox-tools
+/plugin install ai-roblox-tools@ai-roblox-tools
+```
+**Or as a plain skill:**
 ```bash
 git clone https://github.com/Nomako20/ai-roblox-tools ~/.claude/skills/ai-roblox-tools
-pip install fonttools pillow playwright
 ```
+For rendering mockups: `pip install fonttools pillow playwright`.
 Rendering uses your installed Edge or Chrome, so no browser download. Blender 4+ is only needed for new 3D icons.
 
 ## Use

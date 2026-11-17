@@ -1,0 +1,1390 @@
+<roblox xmlns:xmime="http://www.w3.org/2005/05/xmlmime" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="http://www.roblox.com/roblox.xsd" version="4">
+<Item class="ModuleScript" referent="RBX10"><Properties>
+<string name="Name">AnimKit</string>
+<ProtectedString name="Source"><![CDATA[-- AnimKit: declarative character animation for Roblox. Made by Nomako20 with Claude.
+-- Describe WHAT the pose is (spec); AnimKit handles joints, hierarchy, CFrames and limits.
+--
+--   local AnimKit = require(game.ServerStorage.AnimKit)
+--   local res = AnimKit.create(spec, workspace.MyRig)   -- validate + build + save
+--   print(res.text)
+
+local Joints = require(script.Joints)
+local Presets = require(script.Presets)
+local Rig = require(script.Rig)
+local Validator = require(script.Validator)
+local Builder = require(script.Builder)
+local Preview = require(script.Preview)
+
+local AnimKit = {}
+AnimKit.VERSION = "1.0.0"
+AnimKit.Examples = require(script.Examples)
+AnimKit.Presets = Presets
+
+local function rigInfoOf(rig)
+	if rig == nil then return nil end
+	if type(rig) == "table" and rig.motors then return rig end
+	local info, err = Rig.inspect(rig)
+	if not info then error("AnimKit: " .. err, 3) end
+	return info
+end
+
+-- Validate only. Returns result { ok, errors, warnings, clamped, anim, text }.
+function AnimKit.validate(spec, rig)
+	local res = Validator.validate(spec, rigInfoOf(rig))
+	res.text = Validator.format(res)
+	return res
+end
+
+-- Validate + build. Returns KeyframeSequence (or nil) and the result.
+function AnimKit.build(spec, rig)
+	local info = rigInfoOf(rig)
+	local res = Validator.validate(spec, info)
+	if res.ok then
+		res.sequence = Builder.build(res.anim, info or Rig.standard(res.anim.rigType))
+		local problems = Builder.check(res.sequence, info or Rig.standard(res.anim.rigType))
+		for _, p in ipairs(problems) do
+			table.insert(res.errors, "builder: " .. p)
+		end
+		res.ok = #problems == 0
+	end
+	res.text = Validator.format(res)
+	return res.ok and res.sequence or nil, res
+end
+
+-- Save a built sequence under rig.AnimSaves (or ServerStorage.AnimSaves when rig is nil).
+function AnimKit.save(sequence, rig)
+	local model = type(rig) == "table" and rig.model or rig
+	return Builder.save(sequence, model)
+end
+
+-- Validate + build + save in one call. Returns result (result.saved = the KeyframeSequence).
+function AnimKit.create(spec, rig)
+	local seq, res = AnimKit.build(spec, rig)
+	if seq then
+		local saved, container = AnimKit.save(seq, rig)
+		res.saved = saved
+		res.text ..= ("\nSaved: %s"):format(saved:GetFullName())
+		res.container = container
+	end
+	return res
+end
+
+-- Play on a rig (Edit or Play mode). `what` = spec or KeyframeSequence. Returns handle with :Stop().
+function AnimKit.preview(rig, what, opts)
+	local info = rigInfoOf(rig)
+	local seq = what
+	if typeof(what) ~= "Instance" then
+		local res
+		seq, res = AnimKit.build(what, info)
+		if not seq then error("AnimKit: spec invalid\n" .. res.text, 2) end
+	end
+	return Preview.play(info, seq, opts)
+end
+
+-- Freeze the rig at time t of a spec (for screenshots). AnimKit.resetPose(rig) undoes it.
+function AnimKit.poseAt(rig, spec, t)
+	local info = rigInfoOf(rig)
+	local res = Validator.validate(spec, info)
+	if not res.ok then error("AnimKit: spec invalid\n" .. Validator.format(res), 2) end
+	Preview.poseAt(info, res.anim, t)
+	return res
+end
+
+function AnimKit.stop(rig)
+	local model = type(rig) == "table" and rig.model or rig
+	Preview.stop(model)
+end
+
+function AnimKit.resetPose(rig)
+	Preview.reset(rigInfoOf(rig))
+end
+
+-- Introspection helpers for agents.
+function AnimKit.presetNames()
+	local t = {}
+	for k in pairs(Presets) do table.insert(t, k) end
+	table.sort(t)
+	return t
+end
+
+function AnimKit.jointInfo(rigType)
+	local lines = {}
+	for name, def in pairs(Joints.table(rigType or "R15")) do
+		local l = def.limits
+		table.insert(lines, ("%s (parent %s) flex %d..%d abduct %d..%d twist %d..%d"):format(
+			name, def.parent, l.flex[1], l.flex[2], l.abduct[1], l.abduct[2], l.twist[1], l.twist[2]))
+	end
+	table.sort(lines)
+	return table.concat(lines, "\n")
+end
+
+AnimKit.inspectRig = Rig.inspect
+
+return AnimKit
+]]></ProtectedString>
+</Properties>
+<Item class="ModuleScript" referent="RBX1"><Properties>
+<string name="Name">Joints</string>
+<ProtectedString name="Source"><![CDATA[-- Joints: rig joint table, friendly aliases and human plausible limits.
+-- Angles are ANATOMICAL degrees, side aware:
+--   flex   : main bend. arm/leg: + = swing forward/up. elbow: + = bend. knee: + = bend.
+--            ankle: + = toes up. wrist: + = palm side bend. spine/neck/root: + = bend forward / nod down.
+--   abduct : sideways. limbs: + = away from the body. spine/neck/root: + = tilt to the character's right.
+--   twist  : around the bone. limbs: + = rotate outward. spine/neck/root: + = turn to the character's right.
+-- sx/sy/sz convert anatomical -> raw parent-part axes (x = flex, y = twist, z = abduct).
+-- order "limb": twist, then abduct, then flex. order "spine": flex, then tilt, then turn.
+
+local Joints = {}
+
+local function def(parent, sx, sy, sz, order, flex, abduct, twist, maxPos)
+	return {
+		parent = parent, sx = sx, sy = sy, sz = sz, order = order,
+		limits = { flex = flex, abduct = abduct, twist = twist },
+		maxPos = maxPos or 0.25,
+	}
+end
+
+local R15 = {
+	LowerTorso = def("HumanoidRootPart", -1, -1, -1, "spine", { -180, 180 }, { -90, 90 }, { -180, 180 }, 4),
+	UpperTorso = def("LowerTorso", -1, -1, -1, "spine", { -35, 75 }, { -35, 35 }, { -60, 60 }),
+	Head = def("UpperTorso", -1, -1, -1, "spine", { -55, 60 }, { -40, 40 }, { -80, 80 }),
+	LeftUpperArm = def("UpperTorso", 1, 1, -1, "limb", { -70, 185 }, { -30, 185 }, { -95, 95 }),
+	RightUpperArm = def("UpperTorso", 1, -1, 1, "limb", { -70, 185 }, { -30, 185 }, { -95, 95 }),
+	LeftLowerArm = def("LeftUpperArm", 1, 1, -1, "limb", { -5, 150 }, { -10, 10 }, { -90, 90 }),
+	RightLowerArm = def("RightUpperArm", 1, -1, 1, "limb", { -5, 150 }, { -10, 10 }, { -90, 90 }),
+	LeftHand = def("LeftLowerArm", 1, 1, -1, "limb", { -75, 80 }, { -30, 30 }, { -30, 30 }),
+	RightHand = def("RightLowerArm", 1, -1, 1, "limb", { -75, 80 }, { -30, 30 }, { -30, 30 }),
+	LeftUpperLeg = def("LowerTorso", 1, 1, -1, "limb", { -40, 125 }, { -25, 75 }, { -45, 45 }),
+	RightUpperLeg = def("LowerTorso", 1, -1, 1, "limb", { -40, 125 }, { -25, 75 }, { -45, 45 }),
+	LeftLowerLeg = def("LeftUpperLeg", -1, 1, -1, "limb", { -5, 150 }, { -10, 10 }, { -20, 20 }),
+	RightLowerLeg = def("RightUpperLeg", -1, -1, 1, "limb", { -5, 150 }, { -10, 10 }, { -20, 20 }),
+	LeftFoot = def("LeftLowerLeg", 1, 1, -1, "limb", { -55, 35 }, { -25, 25 }, { -25, 25 }),
+	RightFoot = def("RightLowerLeg", 1, -1, 1, "limb", { -55, 35 }, { -25, 25 }, { -25, 25 }),
+}
+
+-- R15 canonical name -> R6 part name (nil = joint does not exist on R6)
+local R15_TO_R6 = {
+	LowerTorso = "Torso", Head = "Head",
+	LeftUpperArm = "Left Arm", RightUpperArm = "Right Arm",
+	LeftUpperLeg = "Left Leg", RightUpperLeg = "Right Leg",
+}
+
+local R6 = {}
+for r15Name, r6Name in pairs(R15_TO_R6) do
+	local src = R15[r15Name]
+	local copy = table.clone(src)
+	copy.limits = table.clone(src.limits)
+	copy.parent = (r6Name == "Torso") and "HumanoidRootPart" or "Torso"
+	R6[r6Name] = copy
+end
+
+Joints.R15 = R15
+Joints.R6 = R6
+Joints.R15_TO_R6 = R15_TO_R6
+
+-- Friendly aliases -> R15 canonical name. Keys are normalized (lowercase, no spaces/_/-).
+local ALIASES = {
+	root = "LowerTorso", hips = "LowerTorso", pelvis = "LowerTorso", lowertorso = "LowerTorso",
+	waist = "UpperTorso", spine = "UpperTorso", chest = "UpperTorso", torso = "UpperTorso", uppertorso = "UpperTorso",
+	neck = "Head", head = "Head",
+}
+for _, side in ipairs({ "Left", "Right" }) do
+	local s, l = side, string.lower(side)
+	local short = string.sub(l, 1, 1)
+	local function add(names, target)
+		for _, n in ipairs(names) do
+			ALIASES[l .. n] = s .. target
+			ALIASES[short .. n] = s .. target
+		end
+	end
+	add({ "shoulder", "upperarm", "arm" }, "UpperArm")
+	add({ "elbow", "lowerarm", "forearm" }, "LowerArm")
+	add({ "wrist", "hand" }, "Hand")
+	add({ "hip", "upperleg", "thigh", "leg" }, "UpperLeg")
+	add({ "knee", "lowerleg", "shin" }, "LowerLeg")
+	add({ "ankle", "foot" }, "Foot")
+end
+
+function Joints.normalizeKey(name)
+	return (string.gsub(string.lower(tostring(name)), "[%s_%-%.]", ""))
+end
+
+function Joints.table(rigType)
+	return rigType == "R6" and R6 or R15
+end
+
+-- Resolve a user joint name to the rig part name.
+-- Returns partName or nil, plus a status: "ok" | "absent" (valid name, joint missing on this rig) | "unknown"
+function Joints.resolve(name, rigType)
+	local tbl = Joints.table(rigType)
+	local key = Joints.normalizeKey(name)
+	for partName in pairs(tbl) do
+		if Joints.normalizeKey(partName) == key then
+			return partName, "ok"
+		end
+	end
+	local canonical = ALIASES[key]
+	if not canonical then
+		return nil, "unknown"
+	end
+	if rigType == "R6" then
+		local r6 = R15_TO_R6[canonical]
+		if r6 then
+			return r6, "ok"
+		end
+		return nil, "absent"
+	end
+	return canonical, "ok"
+end
+
+-- Closest known names, for "did you mean" messages.
+function Joints.suggest(name, rigType)
+	local key = Joints.normalizeKey(name)
+	local out = {}
+	local pool = {}
+	for k in pairs(ALIASES) do table.insert(pool, k) end
+	for k in pairs(Joints.table(rigType)) do table.insert(pool, k) end
+	for _, cand in ipairs(pool) do
+		local c = Joints.normalizeKey(cand)
+		if #key >= 3 and (string.find(c, key, 1, true) or string.find(key, c, 1, true)) then
+			table.insert(out, cand)
+		end
+	end
+	table.sort(out)
+	return out
+end
+
+function Joints.isCenter(partName)
+	return not (string.find(partName, "Left", 1, true) or string.find(partName, "Right", 1, true))
+end
+
+function Joints.mirrorName(partName)
+	if string.find(partName, "Left", 1, true) then
+		return (string.gsub(partName, "Left", "Right"))
+	elseif string.find(partName, "Right", 1, true) then
+		return (string.gsub(partName, "Right", "Left"))
+	end
+	return partName
+end
+
+-- Rest C0 rotations of the stock rigs (used when no real rig is given). R15 stock C0s have no rotation.
+local function rot(...) return CFrame.new(0, 0, 0, ...) end
+Joints.STANDARD_C0ROT = {
+	R15 = {},
+	R6 = {
+		Torso = rot(-1, 0, 0, 0, 0, 1, 0, 1, 0),
+		Head = rot(-1, 0, 0, 0, 0, 1, 0, 1, 0),
+		["Right Arm"] = rot(0, 0, 1, 0, 1, 0, -1, 0, 0),
+		["Left Arm"] = rot(0, 0, -1, 0, 1, 0, 1, 0, 0),
+		["Right Leg"] = rot(0, 0, 1, 0, 1, 0, -1, 0, 0),
+		["Left Leg"] = rot(0, 0, -1, 0, 1, 0, 1, 0, 0),
+	},
+}
+
+return Joints
+]]></ProtectedString>
+</Properties>
+</Item>
+<Item class="ModuleScript" referent="RBX2"><Properties>
+<string name="Name">PoseMath</string>
+<ProtectedString name="Source"><![CDATA[-- PoseMath: joint value parsing, mirror, blend, merge, clamp and CFrame conversion.
+-- A "pose" here is { [rigPartName] = { flex, abduct, twist, pos = {x,y,z} } } in anatomical degrees.
+
+local Joints = require(script.Parent.Joints)
+
+local PoseMath = {}
+
+local FIELDS = { "flex", "abduct", "twist" }
+local ANAT_KEYS = { flex = "flex", abduct = "abduct", twist = "twist",
+	bend = "flex", pitch = "flex", side = "abduct", tilt = "abduct", out = "abduct",
+	turn = "twist", yaw = "twist", rotate = "twist" }
+
+local function num(v)
+	return type(v) == "number" and v == v and v or nil
+end
+
+-- Parse one joint value into anatomical form. Accepts:
+--   { flex=, abduct=, twist=, pos={x,y,z} }   (anatomical, recommended)
+--   { x=, y=, z= }  or  {x, y, z}              (raw parent-part axes, degrees)
+-- Returns value, errString
+function PoseMath.parseValue(raw, def)
+	if type(raw) ~= "table" then
+		return nil, "joint value must be a table like {flex=30}"
+	end
+	local v = { flex = 0, abduct = 0, twist = 0 }
+	local rx, ry, rz = raw.x or raw[1], raw.y or raw[2], raw.z or raw[3]
+	if rx ~= nil or ry ~= nil or rz ~= nil then
+		if (rx ~= nil and not num(rx)) or (ry ~= nil and not num(ry)) or (rz ~= nil and not num(rz)) then
+			return nil, "raw x/y/z must be numbers"
+		end
+		v.flex = (rx or 0) * def.sx
+		v.twist = (ry or 0) * def.sy
+		v.abduct = (rz or 0) * def.sz
+	end
+	for key, val in pairs(raw) do
+		local field = type(key) == "string" and ANAT_KEYS[string.lower(key)]
+		if field then
+			if not num(val) then
+				return nil, ("'%s' must be a number"):format(key)
+			end
+			v[field] += val
+		elseif key == "pos" or key == "position" or key == "offset" then
+			local p = val
+			if type(p) ~= "table" then
+				return nil, "pos must be {x, y, z} in studs"
+			end
+			local px, py, pz = p.x or p[1] or 0, p.y or p[2] or 0, p.z or p[3] or 0
+			if not (num(px) and num(py) and num(pz)) then
+				return nil, "pos values must be numbers"
+			end
+			v.pos = { px, py, pz }
+		elseif type(key) == "string" and not (key == "x" or key == "y" or key == "z") then
+			return nil, ("unknown field '%s' (use flex/abduct/twist/pos or x/y/z)"):format(key)
+		end
+	end
+	return v
+end
+
+function PoseMath.copyValue(v)
+	local c = { flex = v.flex or 0, abduct = v.abduct or 0, twist = v.twist or 0 }
+	if v.pos then c.pos = { v.pos[1], v.pos[2], v.pos[3] } end
+	return c
+end
+
+function PoseMath.copy(pose)
+	local out = {}
+	for k, v in pairs(pose) do out[k] = PoseMath.copyValue(v) end
+	return out
+end
+
+-- Swap left/right. Limb values are side aware so they move as-is;
+-- center joints flip their sideways tilt and turn; positions flip x.
+function PoseMath.mirror(pose)
+	local out = {}
+	for part, v in pairs(pose) do
+		local c = PoseMath.copyValue(v)
+		if Joints.isCenter(part) then
+			c.abduct = -c.abduct
+			c.twist = -c.twist
+		end
+		if c.pos then c.pos[1] = -c.pos[1] end
+		out[Joints.mirrorName(part)] = c
+	end
+	return out
+end
+
+-- Linear blend; joints missing on one side count as neutral.
+function PoseMath.blend(a, b, t)
+	local out = {}
+	local zero = { flex = 0, abduct = 0, twist = 0 }
+	local keys = {}
+	for k in pairs(a) do keys[k] = true end
+	for k in pairs(b) do keys[k] = true end
+	for k in pairs(keys) do
+		local va, vb = a[k] or zero, b[k] or zero
+		local c = {}
+		for _, f in ipairs(FIELDS) do
+			c[f] = (va[f] or 0) + ((vb[f] or 0) - (va[f] or 0)) * t
+		end
+		if va.pos or vb.pos then
+			local pa, pb = va.pos or { 0, 0, 0 }, vb.pos or { 0, 0, 0 }
+			c.pos = { pa[1] + (pb[1] - pa[1]) * t, pa[2] + (pb[2] - pa[2]) * t, pa[3] + (pb[3] - pa[3]) * t }
+		end
+		out[k] = c
+	end
+	return out
+end
+
+-- Override: fields present in `src` (the raw user table) replace fields in `dst`.
+function PoseMath.override(dst, part, parsed, raw)
+	local cur = dst[part] or { flex = 0, abduct = 0, twist = 0 }
+	local hasRaw = raw.x or raw.y or raw.z or raw[1] or raw[2] or raw[3]
+	for _, f in ipairs(FIELDS) do
+		local given = hasRaw
+		for key in pairs(raw) do
+			if type(key) == "string" and ANAT_KEYS[string.lower(key)] == f then given = true end
+		end
+		if given then cur[f] = parsed[f] end
+	end
+	if parsed.pos then cur.pos = parsed.pos end
+	dst[part] = cur
+end
+
+function PoseMath.add(dst, part, parsed)
+	local cur = dst[part] or { flex = 0, abduct = 0, twist = 0 }
+	for _, f in ipairs(FIELDS) do cur[f] = (cur[f] or 0) + parsed[f] end
+	if parsed.pos then
+		local p = cur.pos or { 0, 0, 0 }
+		cur.pos = { p[1] + parsed.pos[1], p[2] + parsed.pos[2], p[3] + parsed.pos[3] }
+	end
+	dst[part] = cur
+end
+
+-- Clamp in place; returns list of "field value -> clamped" strings.
+function PoseMath.clamp(v, def)
+	local notes = {}
+	for _, f in ipairs(FIELDS) do
+		local lim = def.limits[f]
+		local val = v[f]
+		if val < lim[1] or val > lim[2] then
+			local c = math.clamp(val, lim[1], lim[2])
+			table.insert(notes, ("%s %g -> %g (range %g..%g)"):format(f, val, c, lim[1], lim[2]))
+			v[f] = c
+		end
+	end
+	if v.pos then
+		local p = Vector3.new(v.pos[1], v.pos[2], v.pos[3])
+		if p.Magnitude > def.maxPos then
+			local c = p.Unit * def.maxPos
+			table.insert(notes, ("pos length %.2f -> %.2f studs"):format(p.Magnitude, def.maxPos))
+			v.pos = { c.X, c.Y, c.Z }
+		end
+	end
+	return notes
+end
+
+-- Rotation in the parent part's axes, around the joint pivot.
+function PoseMath.localCFrame(v, def)
+	local rx = math.rad(v.flex * def.sx)
+	local ry = math.rad(v.twist * def.sy)
+	local rz = math.rad(v.abduct * def.sz)
+	local r
+	if def.order == "spine" then
+		r = CFrame.Angles(0, ry, 0) * CFrame.Angles(0, 0, rz) * CFrame.Angles(rx, 0, 0)
+	else
+		r = CFrame.Angles(rx, 0, 0) * CFrame.Angles(0, 0, rz) * CFrame.Angles(0, ry, 0)
+	end
+	if v.pos then
+		r = CFrame.new(v.pos[1], v.pos[2], v.pos[3]) * r
+	end
+	return r
+end
+
+-- Motor6D.Transform (= Pose.CFrame) so that `localCF` is applied in Part0 axes at the joint:
+-- Part1 = Part0 * C0 * T * C1:Inverse(), and C0 = pos * c0rot  =>  T = c0rot^-1 * L * c0rot
+function PoseMath.toTransform(localCF, c0rot)
+	if not c0rot then return localCF end
+	return c0rot:Inverse() * localCF * c0rot
+end
+
+return PoseMath
+]]></ProtectedString>
+</Properties>
+</Item>
+<Item class="ModuleScript" referent="RBX3"><Properties>
+<string name="Name">Presets</string>
+<ProtectedString name="Source"><![CDATA[-- Presets: named poses in anatomical degrees (see Joints.lua for sign meaning).
+-- Right side variants are authored; use `mirror = true` in a keyframe for the left side.
+-- root.pos is in studs relative to HumanoidRootPart (y < 0 = crouch lower).
+
+local P = {}
+
+P.neutral = {}
+
+P.tpose = {
+	left_shoulder = { abduct = 90 }, right_shoulder = { abduct = 90 },
+}
+
+P.idle = {
+	waist = { flex = 2 },
+	neck = { flex = 3 },
+	left_shoulder = { abduct = 6, flex = 3 }, right_shoulder = { abduct = 6, flex = 3 },
+	left_elbow = { flex = 10 }, right_elbow = { flex = 10 },
+	left_knee = { flex = 4 }, right_knee = { flex = 4 },
+	left_hip = { flex = 2 }, right_hip = { flex = 2 },
+}
+
+P.idle_inhale = {
+	root = { pos = { 0, 0.04, 0 } },
+	waist = { flex = -2 },
+	neck = { flex = 1 },
+	left_shoulder = { abduct = 9, flex = 2 }, right_shoulder = { abduct = 9, flex = 2 },
+	left_elbow = { flex = 12 }, right_elbow = { flex = 12 },
+	left_knee = { flex = 2 }, right_knee = { flex = 2 },
+}
+
+-- Run: right foot strikes ahead, left arm forward. Mirror for the other side.
+P.run_contact = {
+	root = { flex = 10, twist = -6, pos = { 0, -0.15, 0 } },
+	waist = { flex = 5, twist = 12 },
+	neck = { flex = -8, twist = -6 },
+	right_hip = { flex = 40 }, right_knee = { flex = 15 }, right_ankle = { flex = 10 },
+	left_hip = { flex = -25 }, left_knee = { flex = 50 }, left_ankle = { flex = -20 },
+	left_shoulder = { flex = 45, abduct = 8 }, left_elbow = { flex = 80 },
+	right_shoulder = { flex = -40, abduct = 8 }, right_elbow = { flex = 55 },
+}
+
+-- Run: right leg under the body carrying weight, left knee driving forward and high.
+P.run_passing = {
+	root = { flex = 10, pos = { 0, 0.12, 0 } },
+	waist = { flex = 5 },
+	neck = { flex = -8 },
+	right_hip = { flex = -5 }, right_knee = { flex = 25 }, right_ankle = { flex = -10 },
+	left_hip = { flex = 55 }, left_knee = { flex = 105 }, left_ankle = { flex = 5 },
+	left_shoulder = { flex = 10, abduct = 8 }, left_elbow = { flex = 85 },
+	right_shoulder = { flex = -5, abduct = 8 }, right_elbow = { flex = 85 },
+}
+
+-- Right hand punch.
+P.fight_stance = {
+	root = { twist = 15, pos = { 0, -0.2, 0 } },
+	waist = { twist = 5, flex = 8 },
+	neck = { twist = -15, flex = 5 },
+	left_hip = { flex = 20, abduct = 8 }, left_knee = { flex = 25 },
+	right_hip = { flex = -10, abduct = 8 }, right_knee = { flex = 25 },
+	left_shoulder = { flex = 55, abduct = 10 }, left_elbow = { flex = 120 },
+	right_shoulder = { flex = 40, abduct = 15 }, right_elbow = { flex = 130 },
+}
+
+P.punch_windup = {
+	root = { twist = 25, pos = { 0, -0.25, 0 } },
+	waist = { twist = 20, flex = 6 },
+	neck = { twist = -35, flex = 5 },
+	left_hip = { flex = 22, abduct = 8 }, left_knee = { flex = 30 },
+	right_hip = { flex = -12, abduct = 8 }, right_knee = { flex = 30 },
+	left_shoulder = { flex = 55, abduct = 10 }, left_elbow = { flex = 115 },
+	right_shoulder = { flex = 15, abduct = 25 }, right_elbow = { flex = 140 },
+}
+
+P.punch_hit = {
+	root = { twist = -10, pos = { 0, -0.2, -0.15 } },
+	waist = { twist = -25, flex = 12 },
+	neck = { twist = 30, flex = 0 },
+	left_hip = { flex = 25, abduct = 8 }, left_knee = { flex = 30 },
+	right_hip = { flex = -18, abduct = 8 }, right_knee = { flex = 15 },
+	left_shoulder = { flex = 40, abduct = 10 }, left_elbow = { flex = 125 },
+	right_shoulder = { flex = 90, abduct = 5 }, right_elbow = { flex = 5 }, right_wrist = { flex = 0 },
+}
+
+P.jump_crouch = {
+	root = { flex = 15, pos = { 0, -0.7, 0 } },
+	waist = { flex = 20 },
+	neck = { flex = -25 },
+	left_hip = { flex = 75 }, right_hip = { flex = 75 },
+	left_knee = { flex = 95 }, right_knee = { flex = 95 },
+	left_ankle = { flex = 35 }, right_ankle = { flex = 35 },
+	left_shoulder = { flex = -45, abduct = 10 }, right_shoulder = { flex = -45, abduct = 10 },
+	left_elbow = { flex = 20 }, right_elbow = { flex = 20 },
+}
+
+P.jump_air = {
+	root = { flex = -5, pos = { 0, 0.3, 0 } },
+	waist = { flex = -10 },
+	neck = { flex = -10 },
+	left_hip = { flex = 30 }, right_hip = { flex = 20 },
+	left_knee = { flex = 55 }, right_knee = { flex = 35 },
+	left_ankle = { flex = -30 }, right_ankle = { flex = -30 },
+	left_shoulder = { flex = 150, abduct = 20 }, right_shoulder = { flex = 150, abduct = 20 },
+	left_elbow = { flex = 20 }, right_elbow = { flex = 20 },
+}
+
+P.jump_land = {
+	root = { flex = 12, pos = { 0, -0.5, 0 } },
+	waist = { flex = 18 },
+	neck = { flex = -15 },
+	left_hip = { flex = 60 }, right_hip = { flex = 60 },
+	left_knee = { flex = 80 }, right_knee = { flex = 80 },
+	left_ankle = { flex = 30 }, right_ankle = { flex = 30 },
+	left_shoulder = { flex = 35, abduct = 30 }, right_shoulder = { flex = 35, abduct = 30 },
+	left_elbow = { flex = 35 }, right_elbow = { flex = 35 },
+}
+
+-- Right hand wave: upper arm out to the side, rotated outward so the forearm points up.
+-- Swing the hand by changing right_elbow.flex (70 = hand tilts out, 110 = hand tilts over the head).
+P.wave = {
+	waist = { abduct = -4 },
+	neck = { abduct = 6, flex = -3 },
+	right_shoulder = { abduct = 95, twist = 90, flex = 10 }, right_elbow = { flex = 90 },
+	left_shoulder = { abduct = 6 }, left_elbow = { flex = 10 },
+}
+P.wave_out = { right_shoulder = { abduct = 95, twist = 90, flex = 10 }, right_elbow = { flex = 70 },
+	waist = { abduct = -4 }, neck = { abduct = 6, flex = -3 }, left_shoulder = { abduct = 6 }, left_elbow = { flex = 10 } }
+P.wave_in = { right_shoulder = { abduct = 95, twist = 90, flex = 10 }, right_elbow = { flex = 115 },
+	waist = { abduct = -4 }, neck = { abduct = 6, flex = -3 }, left_shoulder = { abduct = 6 }, left_elbow = { flex = 10 } }
+
+P.sit = {
+	left_hip = { flex = 90, abduct = 5 }, right_hip = { flex = 90, abduct = 5 },
+	left_knee = { flex = 90 }, right_knee = { flex = 90 },
+	left_shoulder = { flex = 25, abduct = 5 }, right_shoulder = { flex = 25, abduct = 5 },
+	left_elbow = { flex = 50 }, right_elbow = { flex = 50 },
+	waist = { flex = 3 },
+}
+
+P.victory = {
+	root = { pos = { 0, 0.1, 0 } },
+	waist = { flex = -10 },
+	neck = { flex = -20 },
+	left_shoulder = { abduct = 150, flex = 15 }, right_shoulder = { abduct = 150, flex = 15 },
+	left_elbow = { flex = 15 }, right_elbow = { flex = 15 },
+	left_wrist = { flex = 20 }, right_wrist = { flex = 20 },
+	left_hip = { abduct = 6 }, right_hip = { abduct = 6 },
+}
+
+-- Two handed weapon raised high over the head (right hand leads).
+P.overhead_raise = {
+	root = { flex = -5, pos = { 0, 0.05, 0.1 } },
+	waist = { flex = -18 },
+	neck = { flex = -15 },
+	left_shoulder = { flex = 170, abduct = -10 }, right_shoulder = { flex = 170, abduct = -10 },
+	left_elbow = { flex = 60 }, right_elbow = { flex = 60 },
+	left_wrist = { flex = -30 }, right_wrist = { flex = -30 },
+	left_hip = { flex = 15 }, right_hip = { flex = -10 },
+	left_knee = { flex = 10 }, right_knee = { flex = 10 },
+}
+
+P.overhead_slam = {
+	root = { flex = 25, pos = { 0, -0.6, -0.2 } },
+	waist = { flex = 45 },
+	neck = { flex = -30 },
+	left_shoulder = { flex = 60, abduct = -10 }, right_shoulder = { flex = 60, abduct = -10 },
+	left_elbow = { flex = 5 }, right_elbow = { flex = 5 },
+	left_wrist = { flex = 20 }, right_wrist = { flex = 20 },
+	left_hip = { flex = 70 }, right_hip = { flex = 10 },
+	left_knee = { flex = 85 }, right_knee = { flex = 55 },
+	left_ankle = { flex = 35 }, right_ankle = { flex = 0 },
+}
+
+return P
+]]></ProtectedString>
+</Properties>
+</Item>
+<Item class="ModuleScript" referent="RBX4"><Properties>
+<string name="Name">Rig</string>
+<ProtectedString name="Source"><![CDATA[-- Rig: reads a character model's Motor6D tree (or stands in a stock R15/R6 layout).
+-- info = { model, rigType, motors = { [part1Name] = { motor, parent = part0Name, c0rot } }, root = "HumanoidRootPart" }
+
+local Joints = require(script.Parent.Joints)
+
+local Rig = {}
+
+local function rotOnly(cf)
+	return cf - cf.Position
+end
+
+function Rig.detectType(model)
+	local hum = model:FindFirstChildOfClass("Humanoid")
+	if model:FindFirstChild("UpperTorso") or model:FindFirstChild("LowerTorso") then
+		return "R15"
+	end
+	if model:FindFirstChild("Torso") then
+		return "R6"
+	end
+	if hum then
+		return hum.RigType == Enum.HumanoidRigType.R6 and "R6" or "R15"
+	end
+	return nil
+end
+
+-- Returns info or nil, error
+function Rig.inspect(model)
+	if typeof(model) ~= "Instance" or not model:IsA("Model") then
+		return nil, "rig must be a Model (select the character model, not a part)"
+	end
+	local rigType = Rig.detectType(model)
+	if not rigType then
+		return nil, ("'%s' does not look like an R15 or R6 character"):format(model.Name)
+	end
+	local motors = {}
+	for _, d in ipairs(model:GetDescendants()) do
+		if d:IsA("Motor6D") and d.Part0 and d.Part1
+			and d.Part0:IsDescendantOf(model) and d.Part1:IsDescendantOf(model) then
+			motors[d.Part1.Name] = { motor = d, parent = d.Part0.Name, c0rot = rotOnly(d.C0) }
+		end
+	end
+	if not model:FindFirstChild("HumanoidRootPart") then
+		return nil, ("'%s' has no HumanoidRootPart"):format(model.Name)
+	end
+	local missing = {}
+	for partName in pairs(Joints.table(rigType)) do
+		if not motors[partName] then
+			table.insert(missing, partName)
+		end
+	end
+	return {
+		model = model, rigType = rigType, motors = motors,
+		root = "HumanoidRootPart", missing = missing,
+	}
+end
+
+-- Stock layout without a real model (build only, no preview).
+function Rig.standard(rigType)
+	local motors = {}
+	local c0 = Joints.STANDARD_C0ROT[rigType] or {}
+	for partName, def in pairs(Joints.table(rigType)) do
+		motors[partName] = { parent = def.parent, c0rot = c0[partName] }
+	end
+	return { rigType = rigType, motors = motors, root = "HumanoidRootPart", missing = {} }
+end
+
+-- Parts in parent-before-child order, starting under the root.
+function Rig.ordered(info)
+	local children = {}
+	for part, m in pairs(info.motors) do
+		children[m.parent] = children[m.parent] or {}
+		table.insert(children[m.parent], part)
+	end
+	local out = {}
+	local function walk(name, depth)
+		if depth > 64 then return end
+		local kids = children[name]
+		if not kids then return end
+		table.sort(kids)
+		for _, k in ipairs(kids) do
+			table.insert(out, k)
+			walk(k, depth + 1)
+		end
+	end
+	walk(info.root, 0)
+	return out
+end
+
+-- Clear every Transform this tool may have written.
+function Rig.resetPose(info)
+	for _, m in pairs(info.motors) do
+		if m.motor then
+			m.motor.Transform = CFrame.identity
+		end
+	end
+end
+
+return Rig
+]]></ProtectedString>
+</Properties>
+</Item>
+<Item class="ModuleScript" referent="RBX5"><Properties>
+<string name="Name">Resolve</string>
+<ProtectedString name="Source"><![CDATA[-- Resolve: turns keyframe pose descriptions (preset names, inline poses, mirror, blend,
+-- joint overrides) into a pose keyed by real rig part names. Never throws; it reports.
+
+local Joints = require(script.Parent.Joints)
+local PoseMath = require(script.Parent.PoseMath)
+local Presets = require(script.Parent.Presets)
+
+local Resolve = {}
+
+local function presetNames(spec)
+	local names = {}
+	for k in pairs(Presets) do table.insert(names, k) end
+	for k in pairs(spec.presets or {}) do table.insert(names, k) end
+	table.sort(names)
+	return table.concat(names, ", ")
+end
+
+-- raw { jointName = value } -> pose { rigPart = value }
+function Resolve.pose(raw, ctx, where, mode, into)
+	local out = into or {}
+	if type(raw) ~= "table" then
+		ctx.report:error(where, "pose must be a table of joints, e.g. { right_elbow = { flex = 90 } }")
+		return out
+	end
+	for name, value in pairs(raw) do
+		local part, status = Joints.resolve(name, ctx.rigType)
+		if status == "unknown" then
+			local hint = Joints.suggest(name, ctx.rigType)
+			ctx.report:error(where, ("unknown joint '%s'%s"):format(tostring(name),
+				#hint > 0 and (" (did you mean: " .. table.concat(hint, ", ") .. ")") or ""))
+		elseif status == "absent" then
+			ctx.report:warnOnce(("joint '%s' does not exist on %s, ignored"):format(tostring(name), ctx.rigType))
+		else
+			local def = Joints.table(ctx.rigType)[part]
+			local parsed, err = PoseMath.parseValue(value, def)
+			if not parsed then
+				ctx.report:error(where, ("%s: %s"):format(tostring(name), err))
+			elseif mode == "override" then
+				PoseMath.override(out, part, parsed, value)
+			else
+				PoseMath.add(out, part, parsed)
+			end
+		end
+	end
+	return out
+end
+
+local function base(ref, ctx, where, depth)
+	if type(ref) == "table" then
+		return Resolve.pose(ref, ctx, where, "add")
+	end
+	if type(ref) ~= "string" then
+		ctx.report:error(where, "pose must be a preset name or a table")
+		return {}
+	end
+	local custom = ctx.spec.presets and ctx.spec.presets[ref]
+	if custom ~= nil then
+		ctx.cache = ctx.cache or {}
+		if ctx.cache[ref] then return PoseMath.copy(ctx.cache[ref]) end
+		local p
+		if type(custom) == "table" and (custom.base or custom.pose or custom.blend or custom.joints or custom.mirror) then
+			p = Resolve.keyframe(custom, ctx, where .. " preset '" .. ref .. "'", depth + 1)
+		else
+			p = Resolve.pose(custom, ctx, where .. " preset '" .. ref .. "'", "add")
+		end
+		ctx.cache[ref] = p
+		return PoseMath.copy(p)
+	end
+	local builtin = Presets[ref]
+	if builtin == nil then
+		ctx.report:error(where, ("unknown preset '%s'. Known: %s"):format(ref, presetNames(ctx.spec)))
+		return {}
+	end
+	return Resolve.pose(builtin, ctx, where .. " preset '" .. ref .. "'", "add")
+end
+
+-- kf fields used: pose | base, blend = {a, b, t}, mirror, joints (replace fields), add (offsets)
+function Resolve.keyframe(kf, ctx, where, depth)
+	depth = depth or 0
+	if depth > 8 then
+		ctx.report:error(where, "presets reference each other too deeply (loop?)")
+		return {}
+	end
+	local ref = kf.pose or kf.base
+	local pose
+	if kf.blend ~= nil then
+		if ref ~= nil then
+			ctx.report:error(where, "use either 'pose' or 'blend', not both")
+		end
+		local b = kf.blend
+		local a, bb, t = b and (b[1] or b.a or b.from), b and (b[2] or b.b or b.to), b and (b[3] or b.t)
+		if type(b) ~= "table" or a == nil or bb == nil or type(t) ~= "number" then
+			ctx.report:error(where, "blend must be {poseA, poseB, t} with t between 0 and 1")
+			pose = {}
+		else
+			if t < 0 or t > 1 then
+				ctx.report:warn(("%s: blend t=%g clamped to 0..1"):format(where, t))
+				t = math.clamp(t, 0, 1)
+			end
+			pose = PoseMath.blend(base(a, ctx, where, depth), base(bb, ctx, where, depth), t)
+		end
+	elseif ref ~= nil then
+		pose = base(ref, ctx, where, depth)
+	else
+		pose = {}
+	end
+	if kf.mirror == true then
+		pose = PoseMath.mirror(pose)
+	end
+	if kf.joints ~= nil then
+		Resolve.pose(kf.joints, ctx, where .. " joints", "override", pose)
+	end
+	if kf.add ~= nil then
+		Resolve.pose(kf.add, ctx, where .. " add", "add", pose)
+	end
+	return pose
+end
+
+return Resolve
+]]></ProtectedString>
+</Properties>
+</Item>
+<Item class="ModuleScript" referent="RBX6"><Properties>
+<string name="Name">Validator</string>
+<ProtectedString name="Source"><![CDATA[-- Validator: checks a spec, resolves every keyframe to a clamped pose, and returns a report.
+-- Never throws for bad input; read result.ok / result.errors / result.warnings / result.clamped.
+
+local HttpService = game:GetService("HttpService")
+local Joints = require(script.Parent.Joints)
+local PoseMath = require(script.Parent.PoseMath)
+local Resolve = require(script.Parent.Resolve)
+
+local Validator = {}
+
+local PRIORITIES = { Core = true, Idle = true, Movement = true, Action = true,
+	Action2 = true, Action3 = true, Action4 = true }
+local STYLES = { Linear = true, Constant = true, Elastic = true, Cubic = true, Bounce = true, CubicV2 = true }
+local DIRS = { In = true, Out = true, InOut = true }
+
+local function newReport()
+	local r = { errors = {}, warnings = {}, clamped = {}, _seen = {} }
+	function r:error(where, msg) table.insert(self.errors, where .. ": " .. msg) end
+	function r:warn(msg) table.insert(self.warnings, msg) end
+	function r:warnOnce(msg)
+		if not self._seen[msg] then self._seen[msg] = true; table.insert(self.warnings, msg) end
+	end
+	return r
+end
+
+local function parseEasing(e, dirOverride, report, where)
+	local style, dir = "CubicV2", "InOut"
+	if type(e) == "string" then
+		style = e
+	elseif type(e) == "table" then
+		style = e.style or e[1] or style
+		dir = e.direction or e[2] or dir
+	elseif e ~= nil then
+		report:error(where, "easing must be a style name or {style, direction}")
+	end
+	dir = dirOverride or dir
+	if not STYLES[style] then
+		report:error(where, ("easing style '%s' invalid (Linear, Constant, Cubic, CubicV2, Elastic, Bounce)"):format(tostring(style)))
+		style = "CubicV2"
+	end
+	if not DIRS[dir] then
+		report:error(where, ("easing direction '%s' invalid (In, Out, InOut)"):format(tostring(dir)))
+		dir = "InOut"
+	end
+	return style, dir
+end
+
+local function decode(spec, report)
+	if type(spec) == "string" then
+		local ok, res = pcall(HttpService.JSONDecode, HttpService, spec)
+		if not ok then
+			report:error("spec", "JSON parse failed: " .. tostring(res))
+			return nil
+		end
+		return res
+	end
+	if type(spec) ~= "table" then
+		report:error("spec", "spec must be a table or a JSON string")
+		return nil
+	end
+	return spec
+end
+
+-- rigInfo is optional (from Rig.inspect). Returns result table.
+function Validator.validate(specIn, rigInfo)
+	local report = newReport()
+	local spec = decode(specIn, report)
+	local result = { ok = false, errors = report.errors, warnings = report.warnings, clamped = report.clamped }
+	if not spec then return result end
+
+	local rigType = spec.rig and string.upper(tostring(spec.rig)) or nil
+	if rigType and rigType ~= "R15" and rigType ~= "R6" then
+		report:error("rig", "must be \"R15\" or \"R6\"")
+		rigType = nil
+	end
+	if rigInfo and rigType and rigInfo.rigType ~= rigType then
+		report:error("rig", ("spec is %s but the rig '%s' is %s"):format(rigType, rigInfo.model and rigInfo.model.Name or "?", rigInfo.rigType))
+	end
+	rigType = rigType or (rigInfo and rigInfo.rigType) or "R15"
+	if not spec.rig then report:warn("rig not set, using " .. rigType) end
+
+	local length = spec.length
+	if type(length) ~= "number" or length <= 0 or length > 120 then
+		report:error("length", "must be a number of seconds between 0 and 120")
+		length = 1
+	end
+	local fps = spec.fps or 60
+	if type(fps) ~= "number" or fps < 1 or fps > 240 then
+		report:error("fps", "must be between 1 and 240"); fps = 60
+	end
+	local priority = spec.priority or "Action"
+	if not PRIORITIES[priority] then
+		report:error("priority", "must be Core, Idle, Movement, Action, Action2, Action3 or Action4"); priority = "Action"
+	end
+	if spec.looped ~= nil and type(spec.looped) ~= "boolean" then
+		report:error("looped", "must be true or false")
+	end
+	local looped = spec.looped == true
+
+	local kfs = spec.keyframes
+	if type(kfs) ~= "table" or #kfs == 0 then
+		report:error("keyframes", "need at least one keyframe")
+		return result
+	end
+
+	local ctx = { spec = spec, rigType = rigType, report = report }
+	local defs = Joints.table(rigType)
+	local out, lastTime = {}, -1
+	for i, kf in ipairs(kfs) do
+		local where = ("keyframe %d"):format(i)
+		if type(kf) ~= "table" then
+			report:error(where, "must be a table"); continue
+		end
+		local t = kf.time
+		if type(t) ~= "number" then
+			report:error(where, "time missing (seconds)"); continue
+		end
+		local snapped = math.floor(t * fps + 0.5) / fps
+		if math.abs(snapped - t) > 1e-4 then
+			report:warn(("%s: time %g snapped to frame %g"):format(where, t, snapped))
+		end
+		t = snapped
+		where = ("keyframe %d (t=%g)"):format(i, t)
+		if t < 0 or t > length + 1e-6 then
+			report:error(where, ("time outside 0..length (%g)"):format(length))
+		end
+		if t <= lastTime then
+			report:error(where, "times must be strictly increasing (sort keyframes, no duplicates)")
+		end
+		lastTime = math.max(lastTime, t)
+		local style, dir = parseEasing(kf.easing or spec.easing, kf.direction, report, where)
+		local pose = Resolve.keyframe(kf, ctx, where)
+		for part, v in pairs(pose) do
+			local notes = PoseMath.clamp(v, defs[part])
+			for _, n in ipairs(notes) do
+				table.insert(report.clamped, ("t=%g %s: %s"):format(t, part, n))
+			end
+			if rigInfo and not rigInfo.motors[part] then
+				report:warnOnce(("rig has no Motor6D driving '%s', that joint will not move"):format(part))
+			end
+		end
+		table.insert(out, { time = t, style = style, direction = dir, pose = pose })
+	end
+
+	if #out > 0 and out[1].time > 0 then
+		report:warn("first keyframe is not at time 0; the rig holds neutral until then")
+	end
+	if looped and #out > 0 and spec.autoClose ~= false and out[#out].time < length - 1e-6 then
+		local first = out[1]
+		table.insert(out, { time = length, style = first.style, direction = first.direction, pose = PoseMath.copy(first.pose) })
+		report:warn(("looped: added closing keyframe at t=%g copying keyframe 1 (set autoClose=false to skip)"):format(length))
+	end
+
+	result.ok = #report.errors == 0
+	result.anim = {
+		name = tostring(spec.name or "AnimKitAnimation"), rigType = rigType, length = length,
+		fps = fps, looped = looped, priority = priority, keyframes = out,
+	}
+	return result
+end
+
+function Validator.format(result)
+	local lines = { result.ok and "OK" or ("FAILED with " .. #result.errors .. " error(s)") }
+	for _, e in ipairs(result.errors) do table.insert(lines, "ERROR  " .. e) end
+	for _, w in ipairs(result.warnings) do table.insert(lines, "WARN   " .. w) end
+	for _, c in ipairs(result.clamped) do table.insert(lines, "CLAMP  " .. c) end
+	if result.anim then
+		local a = result.anim
+		table.insert(lines, ("%s  %s  %gs  %d keyframes  looped=%s  priority=%s"):format(
+			a.name, a.rigType, a.length, #a.keyframes, tostring(a.looped), a.priority))
+	end
+	return table.concat(lines, "\n")
+end
+
+return Validator
+]]></ProtectedString>
+</Properties>
+</Item>
+<Item class="ModuleScript" referent="RBX7"><Properties>
+<string name="Name">Builder</string>
+<ProtectedString name="Source"><![CDATA[-- Builder: validated anim -> KeyframeSequence with Poses nested like the Motor6D tree,
+-- and saving into the rig's AnimSaves (ServerStorage.AnimSaves when there is no rig).
+
+local ServerStorage = game:GetService("ServerStorage")
+local Joints = require(script.Parent.Joints)
+local PoseMath = require(script.Parent.PoseMath)
+local Rig = require(script.Parent.Rig)
+
+local Builder = {}
+
+-- Pose.CFrame for every driven part of one keyframe: { [part] = CFrame }
+function Builder.transforms(kf, rigInfo)
+	local defs = Joints.table(rigInfo.rigType)
+	local out = {}
+	for part, m in pairs(rigInfo.motors) do
+		local v, def = kf.pose[part], defs[part]
+		if v and def then
+			out[part] = PoseMath.toTransform(PoseMath.localCFrame(v, def), m.c0rot)
+		else
+			out[part] = CFrame.identity
+		end
+	end
+	return out
+end
+
+local function makePose(name, cf, kf)
+	local p = Instance.new("Pose")
+	p.Name = name
+	p.CFrame = cf
+	p.Weight = 1
+	p.EasingStyle = Enum.PoseEasingStyle[kf.style]
+	p.EasingDirection = Enum.PoseEasingDirection[kf.direction]
+	return p
+end
+
+-- anim: result.anim from Validator. rigInfo: Rig.inspect(model) or Rig.standard(type).
+function Builder.build(anim, rigInfo)
+	rigInfo = rigInfo or Rig.standard(anim.rigType)
+	local seq = Instance.new("KeyframeSequence")
+	seq.Name = anim.name
+	seq.Loop = anim.looped
+	seq.Priority = Enum.AnimationPriority[anim.priority]
+	seq:SetAttribute("AnimKit", true)
+	seq:SetAttribute("AnimKitLength", anim.length)
+
+	local order = Rig.ordered(rigInfo)
+	for i, kf in ipairs(anim.keyframes) do
+		local key = Instance.new("Keyframe")
+		key.Name = ("KF%02d"):format(i)
+		key.Time = kf.time
+		local cfs = Builder.transforms(kf, rigInfo)
+		local poses = {}
+		local rootPose = makePose(rigInfo.root, CFrame.identity, kf)
+		rootPose.Parent = key
+		poses[rigInfo.root] = rootPose
+		for _, part in ipairs(order) do
+			local parentPose = poses[rigInfo.motors[part].parent]
+			if parentPose then
+				local p = makePose(part, cfs[part], kf)
+				p.Parent = parentPose
+				poses[part] = p
+			end
+		end
+		key.Parent = seq
+	end
+	return seq
+end
+
+local function uniqueName(container, base)
+	local name, n = base, 1
+	while true do
+		local existing = container:FindFirstChild(name)
+		if not existing or existing:GetAttribute("AnimKit") == true then
+			return name, existing
+		end
+		n += 1
+		name = ("%s_%d"):format(base, n)
+	end
+end
+
+-- Saves seq. Replaces only an older AnimKit-made sequence of the same name, never someone else's.
+-- Returns the saved KeyframeSequence and the container it went into.
+function Builder.save(seq, model)
+	local container
+	if typeof(model) == "Instance" then
+		container = model:FindFirstChild("AnimSaves")
+		if not container then
+			container = Instance.new("ObjectValue")
+			container.Name = "AnimSaves"
+			container.Parent = model
+		end
+	else
+		container = ServerStorage:FindFirstChild("AnimSaves")
+		if not container then
+			container = Instance.new("Folder")
+			container.Name = "AnimSaves"
+			container.Parent = ServerStorage
+		end
+	end
+	local name, old = uniqueName(container, seq.Name)
+	if old then old:Destroy() end
+	seq.Name = name
+	seq.Parent = container
+	return seq, container
+end
+
+-- Structural self check of a built sequence; returns list of problems (empty = fine).
+function Builder.check(seq, rigInfo)
+	local problems = {}
+	local expected = 1 + #Rig.ordered(rigInfo)
+	for _, key in ipairs(seq:GetKeyframes()) do
+		local count = 0
+		for _, d in ipairs(key:GetDescendants()) do
+			if d:IsA("Pose") then
+				count += 1
+				local parent = d.Parent
+				local m = rigInfo.motors[d.Name]
+				if m and (not parent:IsA("Pose") or parent.Name ~= m.parent) then
+					table.insert(problems, ("%s: pose %s is under %s, expected %s"):format(key.Name, d.Name, parent.Name, m.parent))
+				end
+			end
+		end
+		if count ~= expected then
+			table.insert(problems, ("%s: %d poses, expected %d"):format(key.Name, count, expected))
+		end
+	end
+	return problems
+end
+
+return Builder
+]]></ProtectedString>
+</Properties>
+</Item>
+<Item class="ModuleScript" referent="RBX8"><Properties>
+<string name="Name">Preview</string>
+<ProtectedString name="Source"><![CDATA[-- Preview: play a KeyframeSequence on a rig (Edit mode or Play), or freeze the rig at one time.
+-- Edit mode needs manual stepping (Animator:StepAnimations, plugin/command bar security).
+
+local KeyframeSequenceProvider = game:GetService("KeyframeSequenceProvider")
+local RunService = game:GetService("RunService")
+local TweenService = game:GetService("TweenService")
+local Builder = require(script.Parent.Builder)
+local Rig = require(script.Parent.Rig)
+
+local Preview = {}
+local active = {} -- [model] = handle
+
+local function ease(alpha, style, direction)
+	if style == "Constant" then return 0 end
+	if style == "Linear" then return alpha end
+	local s = (style == "CubicV2") and "Cubic" or style
+	return TweenService:GetValue(alpha, Enum.EasingStyle[s], Enum.EasingDirection[direction])
+end
+
+-- Interpolated transforms at time t (seconds). Pure; uses AnimKit easing approximation.
+function Preview.sample(anim, rigInfo, t)
+	local kfs = anim.keyframes
+	if anim.looped and anim.length > 0 then t = t % anim.length end
+	if t <= kfs[1].time then return Builder.transforms(kfs[1], rigInfo) end
+	for i = 1, #kfs - 1 do
+		local a, b = kfs[i], kfs[i + 1]
+		if t <= b.time then
+			local alpha = ease((t - a.time) / (b.time - a.time), a.style, a.direction)
+			local ca, cb = Builder.transforms(a, rigInfo), Builder.transforms(b, rigInfo)
+			local out = {}
+			for part, cf in pairs(ca) do out[part] = cf:Lerp(cb[part], alpha) end
+			return out
+		end
+	end
+	return Builder.transforms(kfs[#kfs], rigInfo)
+end
+
+-- Freeze the rig at time t by writing Motor6D.Transform (good for screenshots). Undo with Preview.reset.
+function Preview.poseAt(rigInfo, anim, t)
+	Preview.stop(rigInfo.model)
+	local cfs = Preview.sample(anim, rigInfo, t)
+	for part, m in pairs(rigInfo.motors) do
+		if m.motor and cfs[part] then m.motor.Transform = cfs[part] end
+	end
+end
+
+function Preview.reset(rigInfo)
+	Preview.stop(rigInfo.model)
+	Rig.resetPose(rigInfo)
+end
+
+local function findAnimator(model, temps)
+	local owner = model:FindFirstChildOfClass("Humanoid") or model:FindFirstChildOfClass("AnimationController")
+	if not owner then
+		owner = Instance.new("AnimationController")
+		owner.Name = "AnimKitPreviewController"
+		owner.Parent = model
+		table.insert(temps, owner)
+	end
+	local animator = owner:FindFirstChildOfClass("Animator")
+	if not animator then
+		animator = Instance.new("Animator")
+		animator:SetAttribute("AnimKitTemp", true)
+		animator.Parent = owner
+		table.insert(temps, animator)
+	end
+	return animator
+end
+
+-- Plays seq on the rig. opts: { loop = bool, speed = number }. Returns handle with :Stop().
+function Preview.play(rigInfo, seq, opts)
+	opts = opts or {}
+	local model = rigInfo.model
+	Preview.stop(model)
+	local temps = {}
+	local id = KeyframeSequenceProvider:RegisterKeyframeSequence(seq)
+	local anim = Instance.new("Animation")
+	anim.Name = "AnimKitPreview"
+	anim.AnimationId = id
+	local animator = findAnimator(model, temps)
+	local track = animator:LoadAnimation(anim)
+	track.Looped = opts.loop ~= false
+	track:Play(0, 1, opts.speed or 1)
+
+	local conn
+	if not RunService:IsRunning() then
+		conn = RunService.Heartbeat:Connect(function(dt)
+			animator:StepAnimations(dt)
+		end)
+	end
+	local handle = {}
+	function handle.Stop()
+		if active[model] == handle then active[model] = nil end
+		if conn then conn:Disconnect() end
+		pcall(function() track:Stop(0) end)
+		if not RunService:IsRunning() then pcall(function() animator:StepAnimations(0) end) end
+		Rig.resetPose(rigInfo)
+		for i = #temps, 1, -1 do temps[i]:Destroy() end
+		anim:Destroy()
+	end
+	handle.track = track
+	active[model] = handle
+	return handle
+end
+
+function Preview.stop(model)
+	local h = model and active[model]
+	if h then h.Stop() end
+end
+
+return Preview
+]]></ProtectedString>
+</Properties>
+</Item>
+<Item class="ModuleScript" referent="RBX9"><Properties>
+<string name="Name">Examples</string>
+<ProtectedString name="Source"><![CDATA[-- Examples: ready specs (also used as tests). AnimKit.Examples.punch etc.
+
+local E = {}
+
+E.idle_breathe = {
+	name = "AnimKit_IdleBreathe", rig = "R15", length = 3, looped = true, priority = "Idle",
+	keyframes = {
+		{ time = 0, pose = "idle" },
+		{ time = 1.5, pose = "idle_inhale" },
+		-- closing keyframe at t=3 is added automatically because looped = true
+	},
+}
+
+E.run = {
+	name = "AnimKit_Run", rig = "R15", length = 0.6, looped = true, priority = "Movement",
+	easing = "Linear",
+	keyframes = {
+		{ time = 0, pose = "run_contact" },
+		{ time = 0.15, pose = "run_passing" },
+		{ time = 0.3, pose = "run_contact", mirror = true },
+		{ time = 0.45, pose = "run_passing", mirror = true },
+	},
+}
+
+E.punch = {
+	name = "AnimKit_Punch", rig = "R15", length = 0.7, looped = false, priority = "Action",
+	keyframes = {
+		{ time = 0, pose = "fight_stance" },
+		{ time = 0.15, pose = "punch_windup", easing = "Linear" }, -- fast straight drive into the hit
+		{ time = 0.23, pose = "punch_hit" },
+		{ time = 0.32, pose = "punch_hit", joints = { right_shoulder = { flex = 95 } } }, -- follow through
+		{ time = 0.7, pose = "fight_stance" },
+	},
+}
+
+E.wave = {
+	name = "AnimKit_Wave", rig = "R15", length = 2.1, looped = false, priority = "Action",
+	keyframes = {
+		{ time = 0, pose = "idle" },
+		{ time = 0.35, pose = "wave" },
+		{ time = 0.6, pose = "wave_out" },
+		{ time = 0.85, pose = "wave_in" },
+		{ time = 1.1, pose = "wave_out" },
+		{ time = 1.35, pose = "wave_in" },
+		{ time = 1.6, pose = "wave" },
+		{ time = 2.1, pose = "idle" },
+	},
+}
+
+E.jump = {
+	name = "AnimKit_Jump", rig = "R15", length = 1.1, looped = false, priority = "Action",
+	keyframes = {
+		{ time = 0, pose = "idle" },
+		{ time = 0.2, pose = "jump_crouch", easing = "Linear" },
+		{ time = 0.32, pose = "jump_air", easing = { "CubicV2", "InOut" } },
+		{ time = 0.62, blend = { "jump_air", "jump_land", 0.4 } },
+		{ time = 0.75, pose = "jump_land" },
+		{ time = 1.1, pose = "idle" },
+	},
+}
+
+E.sword_slam = {
+	name = "AnimKit_SwordSlam", rig = "R15", length = 1.4, looped = false, priority = "Action",
+	keyframes = {
+		{ time = 0, pose = "idle" },
+		{ time = 0.4, pose = "overhead_raise" },                                     -- anticipation (slow)
+		{ time = 0.5, pose = "overhead_raise", add = { waist = { flex = -5 } }, easing = "Linear" }, -- hang
+		{ time = 0.58, pose = "overhead_slam" },                                     -- action (fast)
+		{ time = 0.66, pose = "overhead_slam", add = { root = { pos = { 0, -0.1, 0 } }, waist = { flex = 5 } } }, -- impact
+		{ time = 1.05, blend = { "overhead_slam", "idle", 0.5 } },                    -- follow through
+		{ time = 1.4, pose = "idle" },                                               -- settle
+	},
+}
+
+return E
+]]></ProtectedString>
+</Properties>
+</Item>
+</Item>
+</roblox>

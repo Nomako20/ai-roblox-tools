@@ -1,5 +1,5 @@
 {
-  "name": "ai-roblox-tools",
+  "name": "roblox-ui-ai",
   "owner": {
     "name": "Nomako20"
   },
@@ -8,7 +8,7 @@
   },
   "plugins": [
     {
-      "name": "ai-roblox-tools",
+      "name": "roblox-ui-ai",
       "source": "./",
       "description": "Roblox UI that looks like the big games: shops, egg screens, season pass, placement, icons, Roblox strategy.",
       "version": "1.0.0",

@@ -1,7 +1,7 @@
 # Guide
 
 ## 1. Setup (5 minutes)
-1. Clone into your skills folder: `~/.claude/skills/ai-roblox-tools` (Windows: `C:\Users\<you>\.claude\skills\ai-roblox-tools`).
+1. Clone into your skills folder: `~/.claude/skills/roblox-ui-ai` (Windows: `C:\Users\<you>\.claude\skills\roblox-ui-ai`).
 2. `pip install fonttools pillow playwright`. Edge or Chrome must be installed (used for rendering).
 3. Test: `cd examples && python egg_flat.py`. It writes `egg_flat.png`.
 

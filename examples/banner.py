@@ -24,7 +24,7 @@ d.add(sunburst(W / 2, 760, 1400, 26, '#7A5CFF', .09), glow(d, W / 2, 520, 620, '
 d.add(shot('egg_hatch_v2', 330, 540, 560, -7), shot('shop_daily_v2', 1270, 540, 560, 7), shot('shop_stock_v2', W / 2, 510, 600, 0))
 import text_paths as TP
 TP.set_font(os.path.join(HERE, '..', 'kit', 'fonts', 'LilitaOne-Regular.ttf'))
-title, size, ty = 'AI Roblox Tools', 118, 138
+title, size, ty = 'Roblox UI AI', 124, 140
 path = TP.path(title, W / 2, ty, size)
 depth = 14
 for k in range(depth, 0, -1):

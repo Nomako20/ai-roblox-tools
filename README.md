@@ -1,4 +1,4 @@
-<p align="center"><img src="examples/banner.png" alt="AI Roblox Tools"></p>
+<p align="center"><img src="examples/banner.png" alt="Roblox UI AI"></p>
 
 <p align="center"><b>A skill that teaches AI agents (Claude Code and similar) to make Roblox UI that looks like the big games,<br>and to understand how successful Roblox games are built.</b></p>
 
@@ -27,12 +27,12 @@
 ## Install
 **Claude Code plugin (one command):**
 ```
-/plugin marketplace add Nomako20/ai-roblox-tools
-/plugin install ai-roblox-tools@ai-roblox-tools
+/plugin marketplace add Nomako20/roblox-ui-ai
+/plugin install roblox-ui-ai@roblox-ui-ai
 ```
 **Or as a plain skill:**
 ```bash
-git clone https://github.com/Nomako20/ai-roblox-tools ~/.claude/skills/ai-roblox-tools
+git clone https://github.com/Nomako20/roblox-ui-ai ~/.claude/skills/roblox-ui-ai
 ```
 For rendering mockups: `pip install fonttools pillow playwright`.
 Rendering uses your installed Edge or Chrome, so no browser download. Blender 4+ is only needed for new 3D icons.
